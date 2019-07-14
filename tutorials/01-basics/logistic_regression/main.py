@@ -163,7 +163,7 @@ def main():
               total += labels.size(0)
               correct += (predicted == labels).sum()
           model.train()
-          writer.add_scalar(tag="test_acc", scalar_value=100 * float(correct) / float(total), global_step=total_step * num_epochs)
+          writer.add_scalar(tag="test_acc", scalar_value=100 * float(correct) / float(total), global_step=total_step * (epoch + 1))
           test_acc_list.append(100 * float(correct) / float(total))
           logging.info('Accuracy of the model on the 10000 test images: {} %'.format(100 * float(correct) / float(total)))
 
