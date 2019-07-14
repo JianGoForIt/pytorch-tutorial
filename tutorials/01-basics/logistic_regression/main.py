@@ -14,7 +14,7 @@ from subprocess import check_output
 # Hyper-parameters 
 input_size = 784
 num_classes = 10
-num_epochs = 3
+num_epochs = 10
 batch_size = 100
 hidden_size = 128
 # we quantize the second linear layer of the 2layer MLP
@@ -101,6 +101,7 @@ def main():
 
   # Train the model
   train_loss_list = []
+  test_acc_list = []
   total_step = len(train_loader)
   for epoch in range(num_epochs):
       if args.use_quant:
@@ -130,7 +131,7 @@ def main():
           loss = criterion(outputs, labels)
 
           writer.add_scalar(tag="train_loss", scalar_value=loss.item(), global_step=epoch * total_step + i)
-          logging.info("Train loss step {}: {}".format(epoch * total_step + i, loss.item()))
+          # logging.info("Train loss step {}: {}".format(epoch * total_step + i, loss.item()))
           train_loss_list.append(loss.item())
 
           # Backward and optimize
@@ -145,28 +146,31 @@ def main():
           model.fc2.quantizer.start_epoch()
 
 
-  # Test the model
-  # In test phase, we don't need to compute gradients (for memory efficiency)
-  with torch.no_grad():
-      correct = 0
-      total = 0
-      for images, labels in test_loader:
-          images = images.reshape(-1, 28*28)
-          if torch.cuda.is_available():
-            images = images.cuda()
-            labels = labels.cuda()
+      # Test the model
+      # In test phase, we don't need to compute gradients (for memory efficiency)
+      with torch.no_grad():
+          model.eval()
+          correct = 0
+          total = 0
+          for images, labels in test_loader:
+              images = images.reshape(-1, 28*28)
+              if torch.cuda.is_available():
+                images = images.cuda()
+                labels = labels.cuda()
 
-          outputs = model(images)
-          _, predicted = torch.max(outputs.data, 1)
-          total += labels.size(0)
-          correct += (predicted == labels).sum()
+              outputs = model(images)
+              _, predicted = torch.max(outputs.data, 1)
+              total += labels.size(0)
+              correct += (predicted == labels).sum()
+          model.train()
+          writer.add_scalar(tag="test_acc", scalar_value=100 * float(correct) / float(total), global_step=total_step * num_epochs)
+          test_acc_list.append(100 * float(correct) / float(total))
+          logging.info('Accuracy of the model on the 10000 test images: {} %'.format(100 * float(correct) / float(total)))
 
-      writer.add_scalar(tag="test_acc", scalar_value=100 * float(correct) / float(total), global_step=total_step * num_epochs)
-      writer.close()
-      logging.info('Accuracy of the model on the 10000 test images: {} %'.format(100 * float(correct) / float(total)))
+  writer.close()
 
   results = {"train_loss": train_loss_list, 
-    "test_acc": 100 * float(correct) / float(total)}
+    "test_acc": test_acc_list}
   results.update(init_results)
   utils.save_result_json(args, results, run_folder)
 # Save the model checkpoint
