@@ -14,7 +14,7 @@ from subprocess import check_output
 # Hyper-parameters 
 input_size = 784
 num_classes = 10
-num_epochs = 10
+num_epochs = 20
 batch_size = 100
 hidden_size = 128
 # we quantize the second linear layer of the 2layer MLP
