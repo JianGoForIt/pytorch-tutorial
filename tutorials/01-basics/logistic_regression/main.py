@@ -7,7 +7,7 @@ import argparse
 import os, sys
 sys.path.append(os.path.join(os.path.dirname(__file__), "../../../../../"))
 import utils
-from quantization_utils import ActivationUniformQuantizerBwOnly
+from compression_utils import ActivationUniformQuantizerBwOnly
 import logging
 from subprocess import check_output
 
@@ -143,13 +143,14 @@ def main():
               logging.info('Epoch [{}/{}], Step [{}/{}], Loss: {:.4f}' 
                      .format(epoch+1, num_epochs, i+1, total_step, loss.item()))
           # turn off quantizer at the end of each epoch
-          model.fc2.quantizer.start_epoch()
+          model.fc2.quantizer.end_epoch()
 
 
       # Test the model
       # In test phase, we don't need to compute gradients (for memory efficiency)
       with torch.no_grad():
           model.eval()
+          model.fc2.quantizer.start_epoch()
           correct = 0
           total = 0
           for images, labels in test_loader:
@@ -162,6 +163,7 @@ def main():
               _, predicted = torch.max(outputs.data, 1)
               total += labels.size(0)
               correct += (predicted == labels).sum()
+          model.fc2.quantizer.end_epoch()
           model.train()
           writer.add_scalar(tag="test_acc", scalar_value=100 * float(correct) / float(total), global_step=total_step * (epoch + 1))
           test_acc_list.append(100 * float(correct) / float(total))
