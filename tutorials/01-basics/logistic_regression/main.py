@@ -8,6 +8,8 @@ import os, sys
 sys.path.append(os.path.join(os.path.dirname(__file__), "../../../../../"))
 import utils
 from compression_utils import ActivationUniformQuantizerBwOnly
+from compression_utils import ActivationPercentageSparsifierBwOnly
+from compression_utils import ActivationDropoutSparsifierBwOnly
 import logging
 from subprocess import check_output
 
@@ -29,12 +31,30 @@ class Net(nn.Module):
     
     def forward(self, x):
         out = self.fc1(x)
+        # self.test_out if for checking the compression results 
+        # during sanity check.
+        self.test_out = out
         out = self.fc2(out)
         return out
 
-def setup_bw_comp_act(model, nbit, sample_act_shape, do_stoc, do_auto_clip):
-  model.fc2.quantizer = ActivationUniformQuantizerBwOnly(model.fc2, nbit, sample_act_shape,
-    do_stoc=do_stoc, do_auto_clip=do_auto_clip)
+def setup_bw_comp_act(model, args):
+  assert args.use_quant == False or args.use_sparse == False
+  if args.use_quant:
+    nbit = args.quant_nbit
+    do_stoc = args.quant_stoc, 
+    do_auto_clip = args.quant_clip
+    model.fc2.compressor = ActivationUniformQuantizerBwOnly(model.fc2, nbit, sample_act_shape,
+      do_stoc=do_stoc, do_auto_clip=do_auto_clip)
+  elif args.use_sparse:
+    if args.sparse_perc:
+      model.fc2.compressor = \
+        ActivationPercentageSparsifierBwOnly(model.fc2, 
+        sparse_level=args.sparse_level, per_sample_sparse=args.per_sample_sparse)
+    elif args.sparse_dropout:
+      model.fc2.compressor = \
+        ActivationDropoutSparsifierBwOnly(model.fc2, sparse_level=args.sparse_level)
+    else:
+      raise Exception("The activation sparsifier type is not specified or supported!")
 
 def collect_sample_to_estimate_clip_threshold(model, train_loader):
   for i, (images, labels) in enumerate(train_loader):
@@ -58,6 +78,11 @@ def main():
   parser.add_argument("--lr", type=float, default=0.1, help="The learning rate for training")
   parser.add_argument("--seed", type=int, help="Random seed for the run.")
   parser.add_argument("--debug", action="store_true", help="If the job is in debuging mode, git diff must be empty if not specified.")
+  parser.add_argument("--use_sparse", action="store_true", help="Use activation sparsifier")
+  parser.add_argument("--sparse_perc", action="store_true", help="Use magnitude and percentage based sparsification.")
+  parser.add_argument("--sparse_dropout", action="store_true", help="Use dropout style sparsification.")
+  parser.add_argument("--per_sample_sparse", action="store_true", help="Whether the sparse_level is with respect to each sample or the entire activation")
+  parser.add_argument("--sparse_level", type=float, default=0.0, help="Sparsity level. 0.9 means 90 percent of the act entries will be zeroed out.")
   args = parser.parse_args()
 
   init_results = utils.experiment_setup(args)
@@ -87,8 +112,7 @@ def main():
   # Logistic regression model
   # model = nn.Linear(input_size, num_classes)
   model = Net(input_size=input_size, hidden_size=hidden_size, num_classes=num_classes)
-  setup_bw_comp_act(model, args.quant_nbit, sample_act_shape=sample_act_shape,
-    do_stoc=args.quant_stoc, do_auto_clip=args.quant_clip)
+  setup_bw_comp_act(model, args=args)
   if torch.cuda.is_available():
     model = model.cuda()
 
@@ -107,18 +131,19 @@ def main():
       if args.use_quant:
         # determine clipping threshold if necessary
         model.eval()
-        model.fc2.quantizer.start_per_epoch_setup()
-        if args.quant_clip:
+        model.fc2.compressor.start_per_epoch_setup()
+        if args.use_quant and args.quant_clip:
           collect_sample_to_estimate_clip_threshold(model, train_loader)
           logging.info("Collected sample for clip threshold estimation for epoch {}".format(epoch) )
-        model.fc2.quantizer.end_per_epoch_setup()
+        model.fc2.compressor.end_per_epoch_setup()
         # run the training steps
         model.train()
         logging.info("Pre training procedures done for epoch {}".format(epoch) )
       
       for i, (images, labels) in enumerate(train_loader):
-          # start quantizer for new epoch
-          model.fc2.quantizer.start_epoch()
+          # print("train ", i)
+          # start compressor for new epoch
+          model.fc2.compressor.start_epoch()
 
           # Reshape images to (batch_size, input_size)
           images = images.reshape(-1, 28*28)
@@ -136,34 +161,42 @@ def main():
 
           # Backward and optimize
           optimizer.zero_grad()
+          # # sanity check on activation
+          # print("train check 1 ", float((model.test_out == 0).sum()) / float(model.test_out.numel()))
+          # print("train check 2 ", float((model.test_out[0] == 0).sum()) / float(model.test_out[0].numel()))
+          # print("train check 3 ", model.test_out[0])
           loss.backward()
           optimizer.step()
           
           if (i+1) % 100 == 0:
               logging.info('Epoch [{}/{}], Step [{}/{}], Loss: {:.4f}' 
                      .format(epoch+1, num_epochs, i+1, total_step, loss.item()))
-          # turn off quantizer at the end of each epoch
-          model.fc2.quantizer.end_epoch()
+          # turn off compressor at the end of each epoch
+          model.fc2.compressor.end_epoch()
 
 
       # Test the model
       # In test phase, we don't need to compute gradients (for memory efficiency)
       with torch.no_grad():
           model.eval()
-          model.fc2.quantizer.start_epoch()
+          model.fc2.compressor.start_epoch()
           correct = 0
           total = 0
-          for images, labels in test_loader:
+          for i, (images, labels) in enumerate(test_loader):
+              # print("test ", i)
               images = images.reshape(-1, 28*28)
               if torch.cuda.is_available():
                 images = images.cuda()
                 labels = labels.cuda()
 
               outputs = model(images)
+              # # sanity check on activation
+              # print("test check 1 ", float((model.test_out == 0).sum()) / float(model.test_out.numel()))
+              # print("test check 2 ", float((model.test_out[0] == 0).sum()) / float(model.test_out[0].numel()))
               _, predicted = torch.max(outputs.data, 1)
               total += labels.size(0)
               correct += (predicted == labels).sum()
-          model.fc2.quantizer.end_epoch()
+          model.fc2.compressor.end_epoch()
           model.train()
           writer.add_scalar(tag="test_acc", scalar_value=100 * float(correct) / float(total), global_step=total_step * (epoch + 1))
           test_acc_list.append(100 * float(correct) / float(total))
